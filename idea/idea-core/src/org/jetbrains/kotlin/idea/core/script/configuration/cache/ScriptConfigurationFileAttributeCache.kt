@@ -8,10 +8,14 @@ package org.jetbrains.kotlin.idea.core.script.configuration.cache
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.psi.PsiManager
+import org.jetbrains.kotlin.idea.core.script.configuration.DefaultScriptConfigurationManager
+import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptConfigurationLoader
+import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptConfigurationLoadingContext
 import org.jetbrains.kotlin.idea.core.script.debug
 import org.jetbrains.kotlin.idea.core.util.*
 import org.jetbrains.kotlin.idea.util.application.runReadAction
 import org.jetbrains.kotlin.psi.KtFile
+import org.jetbrains.kotlin.scripting.definitions.ScriptDefinition
 import org.jetbrains.kotlin.scripting.definitions.findScriptDefinition
 import org.jetbrains.kotlin.scripting.resolve.KtFileScriptSource
 import org.jetbrains.kotlin.scripting.resolve.ScriptCompilationConfigurationWrapper
@@ -20,10 +24,29 @@ import org.jetbrains.kotlin.scripting.resolve.ScriptCompilationConfigurationWrap
 import org.jetbrains.kotlin.scripting.resolve.VirtualFileScriptSource
 import java.io.*
 import kotlin.script.experimental.api.ScriptCompilationConfiguration
+import kotlin.script.experimental.api.asSuccess
 import kotlin.script.experimental.dependencies.ScriptDependencies
 
-class ScriptConfigurationFileAttributeCache(val project: Project) {
-    fun load(
+internal class ScriptConfigurationFileAttributeCache(
+    val project: Project
+) : ScriptConfigurationLoader {
+    /**
+     * todo: this should be changed to storing all roots in the persistent file cache
+     */
+    override fun loadDependencies(
+        isFirstLoad: Boolean,
+        virtualFile: VirtualFile,
+        scriptDefinition: ScriptDefinition,
+        context: ScriptConfigurationLoadingContext
+    ): Boolean {
+        if (!isFirstLoad) return false
+
+        val fromFs = load(virtualFile) ?: return false
+        context.saveConfiguration(virtualFile, fromFs.asSuccess(), true)
+        return true
+    }
+
+    private fun load(
         virtualFile: VirtualFile
     ): ScriptCompilationConfigurationWrapper? {
         val configurationFromAttributes =

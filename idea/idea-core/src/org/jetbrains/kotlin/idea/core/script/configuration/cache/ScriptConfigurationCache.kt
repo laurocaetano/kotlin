@@ -7,13 +7,11 @@ package org.jetbrains.kotlin.idea.core.script.configuration.cache
 
 import com.intellij.openapi.vfs.VirtualFile
 import org.jetbrains.kotlin.scripting.resolve.ScriptCompilationConfigurationWrapper
-import java.io.DataInput
-import java.io.DataOutput
 
 data class CachedConfiguration(
     val cache: ScriptConfigurationCache,
     val file: VirtualFile,
-    val result: ScriptCompilationConfigurationWrapper,
+    val configuration: ScriptCompilationConfigurationWrapper,
     val inputs: Any? = cache.getInputs(file)
 ) {
     val isUpToDate

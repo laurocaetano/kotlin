@@ -27,7 +27,7 @@ internal class ScriptClassRootsCache(
     private val cache: ScriptConfigurationCache
 ) {
     private val all: Collection<CachedConfiguration> get() = cache.all()
-    private fun getConfiguration(file: VirtualFile): ScriptCompilationConfigurationWrapper? = cache[file]?.result
+    private fun getConfiguration(file: VirtualFile): ScriptCompilationConfigurationWrapper? = cache[file]?.configuration
 
     private fun getScriptSdk(compilationConfiguration: ScriptCompilationConfigurationWrapper?): Sdk? {
         // workaround for mismatched gradle wrapper and plugin version
@@ -72,14 +72,14 @@ internal class ScriptClassRootsCache(
 
     val allDependenciesClassFiles by lazy {
         val sdkFiles = allNonIndexedSdks.flatMap { it.rootProvider.getFiles(OrderRootType.CLASSES).toList() }
-        val scriptDependenciesClasspath = all.flatMap { it.result.dependenciesClassPath }.distinct()
+        val scriptDependenciesClasspath = all.flatMap { it.configuration.dependenciesClassPath }.distinct()
 
         sdkFiles + ScriptConfigurationManager.toVfsRoots(scriptDependenciesClasspath)
     }
 
     val allDependenciesSources by lazy {
         val sdkSources = allNonIndexedSdks.flatMap { it.rootProvider.getFiles(OrderRootType.SOURCES).toList() }
-        val scriptDependenciesSources = all.flatMap { it.result.dependenciesSources }.distinct()
+        val scriptDependenciesSources = all.flatMap { it.configuration.dependenciesSources }.distinct()
 
         sdkSources + ScriptConfigurationManager.toVfsRoots(scriptDependenciesSources)
     }

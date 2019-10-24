@@ -61,6 +61,10 @@ internal class ScriptClassRootsIndexer(val project: Project) {
         if (!newRootsPresent) return
         newRootsPresent = false
 
+        indexNewRoots()
+    }
+
+    fun indexNewRoots() {
         val doNotifyRootsChanged = Runnable {
             runWriteAction {
                 if (project.isDisposed) return@runWriteAction

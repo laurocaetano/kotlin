@@ -5,24 +5,28 @@
 
 package org.jetbrains.kotlin.idea.core.script.configuration
 
+import com.intellij.codeInsight.daemon.DaemonCodeAnalyzer
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.components.ServiceManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.psi.PsiManager
 import com.intellij.ui.EditorNotifications
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import org.jetbrains.kotlin.idea.core.script.*
 import org.jetbrains.kotlin.idea.core.script.configuration.cache.CachedConfiguration
 import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationCache
-import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationCompositeCache
+import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationFileAttributeCache
+import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationMemoryCache
+import org.jetbrains.kotlin.idea.core.script.configuration.loader.DefaultScriptConfigurationLoader
+import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptConfigurationLoadingContext
+import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptOutsiderFileConfigurationLoader
 import org.jetbrains.kotlin.idea.core.script.configuration.utils.BackgroundExecutor
-import org.jetbrains.kotlin.idea.core.script.configuration.utils.ScriptConfigurationLoader
 import org.jetbrains.kotlin.idea.core.script.configuration.utils.ScriptsListener
 import org.jetbrains.kotlin.idea.core.script.settings.KotlinScriptingSettings
 import org.jetbrains.kotlin.idea.core.util.EDT
 import org.jetbrains.kotlin.psi.KtFile
-import org.jetbrains.kotlin.scripting.definitions.ScriptDefinition
 import org.jetbrains.kotlin.scripting.definitions.findScriptDefinition
 import org.jetbrains.kotlin.scripting.resolve.ScriptCompilationConfigurationResult
 import org.jetbrains.kotlin.scripting.resolve.ScriptCompilationConfigurationWrapper
@@ -89,9 +93,8 @@ import kotlin.script.experimental.api.valueOrNull
  *
  * [reloadConfigurationInTransaction] guard this states. See it's docs for more details.
  */
-internal class DefaultScriptConfigurationManager(project: Project) : AbstractScriptConfigurationManager(project) {
-    private val loader = ScriptConfigurationLoader()
-
+internal class DefaultScriptConfigurationManager(project: Project) :
+    AbstractScriptConfigurationManager(project) {
     private val backgroundExecutor = BackgroundExecutor(project, rootsIndexer)
     private val listener = ScriptsListener(project, this)
 
@@ -102,8 +105,14 @@ internal class DefaultScriptConfigurationManager(project: Project) : AbstractScr
     private val notApplied = WeakHashMap<VirtualFile, CachedConfiguration>()
     private val saveLock = ReentrantLock()
 
+    private val loaders = listOf(
+        ScriptOutsiderFileConfigurationLoader(project),
+        ScriptConfigurationFileAttributeCache(project),
+        DefaultScriptConfigurationLoader(project)
+    )
+
     override fun createCache(): ScriptConfigurationCache {
-        return object : ScriptConfigurationCompositeCache(project) {
+        return object : ScriptConfigurationMemoryCache(project) {
             override fun getInputs(file: VirtualFile): Any {
                 if (isGradleKotlinScript(file)) {
                     val stamp = gradleScriptConfigurationStamp(project, file)
@@ -112,13 +121,6 @@ internal class DefaultScriptConfigurationManager(project: Project) : AbstractScr
                     }
                 }
                 return file.modificationStamp
-            }
-
-            override fun afterLoadFromFs() {
-                // each loading from fileAttributeCache should clear roots cache,
-                // since ScriptConfigurationCompositeCache.all() will return only memory cached configuration
-                // so, result of all() will be changed on each load from fileAttributeCache
-                clearClassRootsCaches()
             }
 
             override fun markOutOfDate(file: VirtualFile) {
@@ -172,54 +174,49 @@ internal class DefaultScriptConfigurationManager(project: Project) : AbstractScr
         loadEvenWillNotBeApplied: Boolean,
         forceSync: Boolean
     ) {
+        val virtualFile = file.originalFile.virtualFile ?: return
+
         val autoReloadEnabled = KotlinScriptingSettings.getInstance(project).isAutoReloadEnabled
         val shouldLoad = isFirstLoad || loadEvenWillNotBeApplied || autoReloadEnabled
         if (!shouldLoad) return
 
-        val virtualFile = file.originalFile.virtualFile ?: return
-
-        /// Gradle
-        if (!autoReloadEnabled) {
-            //if (isGradleKotlinScript(virtualFile)) return
-        } else {
-            // todo: run script models import
-        }
-        /// /Gradle
-
         if (!ScriptDefinitionsManager.getInstance(project).isReady()) return
         val scriptDefinition = file.findScriptDefinition() ?: return
 
-        if (loader.isAsync(scriptDefinition) && !forceSync) {
+        val (async, sync) = loaders.partition { it.isAsync(scriptDefinition) }
+
+        sync.forEach {
+            if (it.loadDependencies(isFirstLoad, virtualFile, scriptDefinition,)) {
+                return
+            }
+        }
+
+        if (!forceSync) {
             backgroundExecutor.ensureScheduled(virtualFile) {
                 // don't start loading if nothing was changed
                 // (in case we checking for up-to-date and loading concurrently)
-                if (!isUpToDate(file)) {
+                val cached = getCachedConfiguration(virtualFile)
+                if (cached?.isUpToDate != true) {
                     val prevNotApplied = synchronized(notApplied) { notApplied[virtualFile] }
                     if (prevNotApplied?.isUpToDate == true) {
                         // reuse loaded but not applied result
                         // (in case we checking for up-to-date and waiting notification answer concurrently)
-                        saveConfiguration(virtualFile, prevNotApplied.result.asSuccess(), false)
+                        loadingContext.saveConfiguration(virtualFile, prevNotApplied.configuration.asSuccess(), false)
                     } else {
                         synchronized(notApplied) {
                             notApplied.remove(virtualFile)
                         }
-                        doReloadConfiguration(virtualFile, file, scriptDefinition)
+
+                        async.first {
+                            it.loadDependencies(cached == null, virtualFile, scriptDefinition, loadingContext)
+                        }
                     }
                 }
             }
         } else {
-            doReloadConfiguration(virtualFile, file, scriptDefinition)
-        }
-    }
-
-    private fun doReloadConfiguration(
-        virtualFile: VirtualFile,
-        file: KtFile,
-        scriptDefinition: ScriptDefinition
-    ) {
-        val result = loader.loadDependencies(file, scriptDefinition)
-        if (result != null) {
-            saveConfiguration(virtualFile, result, false)
+            async.first {
+                it.loadDependencies(isFirstLoad, virtualFile, scriptDefinition,)
+            }
         }
     }
 
@@ -231,66 +228,71 @@ internal class DefaultScriptConfigurationManager(project: Project) : AbstractScr
     override fun saveCompilationConfigurationAfterImport(files: List<Pair<VirtualFile, ScriptCompilationConfigurationResult>>) {
         rootsIndexer.transaction {
             for ((file, result) in files) {
-                saveConfiguration(file, result, skipNotification = true)
+                loadingContext.saveConfiguration(file, result, skipNotification = true)
             }
         }
     }
 
-    /**
-     * Save [newResult] for [file] into caches and update highlighting.
-     * Should be called inside `rootsManager.transaction { ... }`.
-     *
-     * @param skipNotification forces loading new configuration even if auto reload is disabled.
-     *
-     * @sample ScriptConfigurationManager.getConfiguration
-     */
-    private fun saveConfiguration(
-        file: VirtualFile,
-        newResult: ScriptCompilationConfigurationResult,
-        skipNotification: Boolean
-    ) {
-        saveLock.withLock {
-            debug(file) { "configuration received = $newResult" }
+    private val loadingContext = object : ScriptConfigurationLoadingContext {
+        override fun getCachedConfiguration(file: VirtualFile): CachedConfiguration? =
+            this@DefaultScriptConfigurationManager.getCachedConfiguration(file)
 
-            saveReports(file, newResult.reports)
+        /**
+         * Save [newResult] for [file] into caches and update highlighting.
+         * Should be called inside `rootsManager.transaction { ... }`.
+         *
+         * @param skipNotification forces loading new configuration even if auto reload is disabled.
+         *
+         * @sample ScriptConfigurationManager.getConfiguration
+         */
+        override fun saveConfiguration(
+            file: VirtualFile,
+            newResult: ScriptCompilationConfigurationResult,
+            skipNotification: Boolean
+        ) {
+            saveLock.withLock {
+                debug(file) { "configuration received = $newResult" }
 
-            val newConfiguration = newResult.valueOrNull()
-            if (newConfiguration != null) {
-                val oldConfiguration = getCachedConfiguration(file)
-                if (oldConfiguration == newConfiguration) {
-                    file.removeScriptDependenciesNotificationPanel(project)
-                } else {
-                    val autoReload = skipNotification
-                            || oldConfiguration == null
-                            || KotlinScriptingSettings.getInstance(project).isAutoReloadEnabled
-                            || ApplicationManager.getApplication().isUnitTestMode
+                saveReports(file, newResult.reports)
 
-                    if (autoReload) {
-                        if (oldConfiguration != null) {
-                            file.removeScriptDependenciesNotificationPanel(project)
-                        }
-                        saveChangedConfiguration(file, newConfiguration)
+                val newConfiguration = newResult.valueOrNull()
+                if (newConfiguration != null) {
+                    val oldConfiguration = getCachedConfiguration(file)?.configuration
+                    if (oldConfiguration == newConfiguration) {
+                        file.removeScriptDependenciesNotificationPanel(project)
                     } else {
-                        debug(file) {
-                            "configuration changed, notification is shown: old = $oldConfiguration, new = $newConfiguration"
-                        }
-                        synchronized(notApplied) {
-                            notApplied[file] = CachedConfiguration(cache, file, newConfiguration)
-                        }
-                        file.addScriptDependenciesNotificationPanel(
-                            newConfiguration, project,
-                            onClick = {
+                        val autoReload = skipNotification
+                                || oldConfiguration == null
+                                || KotlinScriptingSettings.getInstance(project).isAutoReloadEnabled
+                                || ApplicationManager.getApplication().isUnitTestMode
+
+                        if (autoReload) {
+                            if (oldConfiguration != null) {
                                 file.removeScriptDependenciesNotificationPanel(project)
-                                rootsIndexer.transaction {
-                                    saveChangedConfiguration(file, it)
-                                }
-                            },
-                            onHide = {
-                                synchronized(notApplied) {
-                                    notApplied.remove(file)
-                                }
                             }
-                        )
+                            saveChangedConfiguration(file, newConfiguration)
+                        } else {
+                            debug(file) {
+                                "configuration changed, notification is shown: old = $oldConfiguration, new = $newConfiguration"
+                            }
+                            synchronized(notApplied) {
+                                notApplied[file] = CachedConfiguration(cache, file, newConfiguration)
+                            }
+                            file.addScriptDependenciesNotificationPanel(
+                                newConfiguration, project,
+                                onClick = {
+                                    file.removeScriptDependenciesNotificationPanel(project)
+                                    rootsIndexer.transaction {
+                                        saveChangedConfiguration(file, it)
+                                    }
+                                },
+                                onHide = {
+                                    synchronized(notApplied) {
+                                        notApplied.remove(file)
+                                    }
+                                }
+                            )
+                        }
                     }
                 }
             }
