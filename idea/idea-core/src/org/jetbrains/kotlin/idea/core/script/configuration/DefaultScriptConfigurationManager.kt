@@ -320,6 +320,10 @@ internal class DefaultScriptConfigurationManager(project: Project) :
             GlobalScope.launch(EDT(project)) {
                 if (project.isDisposed) return@launch
 
+                val ktFile = PsiManager.getInstance(project).findFile(file)
+                if (ktFile != null) {
+                    DaemonCodeAnalyzer.getInstance(project).restart(ktFile)
+                }
                 EditorNotifications.getInstance(project).updateAllNotifications()
             }
         }
