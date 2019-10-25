@@ -101,7 +101,6 @@ class GroupingTest {
         assertEquals(mapOf('f' to 2, 'b' to 3, 'a' to 1, 'z' to 2), counts2)
     }
 
-/*
     @Test fun sumEach() {
         val values = listOf("k" to 50, "b" to 20, "k" to 1000 )
         val summary = values.groupingBy { it.first }.eachSumOf { it.second }
@@ -113,5 +112,4 @@ class GroupingTest {
 
         assertEquals(mapOf("k" to 1053, "b" to 31, "a" to 5), summary2)
     }
-*/
 }
