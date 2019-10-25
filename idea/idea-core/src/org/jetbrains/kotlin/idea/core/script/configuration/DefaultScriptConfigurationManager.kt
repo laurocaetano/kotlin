@@ -15,10 +15,7 @@ import com.intellij.ui.EditorNotifications
 import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.launch
 import org.jetbrains.kotlin.idea.core.script.*
-import org.jetbrains.kotlin.idea.core.script.configuration.cache.CachedConfiguration
-import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationCache
-import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationFileAttributeCache
-import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationMemoryCache
+import org.jetbrains.kotlin.idea.core.script.configuration.cache.*
 import org.jetbrains.kotlin.idea.core.script.configuration.loader.DefaultScriptConfigurationLoader
 import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptConfigurationLoadingContext
 import org.jetbrains.kotlin.idea.core.script.configuration.loader.ScriptOutsiderFileConfigurationLoader
@@ -111,16 +108,19 @@ internal class DefaultScriptConfigurationManager(project: Project) :
         DefaultScriptConfigurationLoader(project)
     )
 
+    private val inputStampCalculators = listOf(
+        DefaultScriptConfigurationInputsStampCalculator(project),
+        GradleKotlinScriptConfigurationInputsStampCalculator(project)
+    )
+
     override fun createCache(): ScriptConfigurationCache {
         return object : ScriptConfigurationMemoryCache(project) {
             override fun getInputs(file: VirtualFile): Any {
-                if (isGradleKotlinScript(file)) {
-                    val stamp = gradleScriptConfigurationStamp(project, file)
-                    if (stamp != null) {
-                        return stamp
-                    }
+                inputStampCalculators.forEach {
+                    val result = it.getInputsStamp(file)
+                    if (result != null) return result
                 }
-                return file.modificationStamp
+                return Any()
             }
 
             override fun markOutOfDate(file: VirtualFile) {

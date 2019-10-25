@@ -13,52 +13,57 @@ import com.intellij.psi.PsiManager
 import com.intellij.psi.PsiRecursiveElementVisitor
 import com.intellij.psi.PsiWhiteSpace
 import com.intellij.psi.impl.source.tree.LeafPsiElement
+import org.jetbrains.kotlin.idea.core.script.configuration.cache.ScriptConfigurationInputsStampCalculator
 import org.jetbrains.kotlin.idea.util.application.runReadAction
 import org.jetbrains.kotlin.psi.KtCallExpression
 import org.jetbrains.kotlin.psi.KtFile
 import org.jetbrains.kotlin.psi.KtScriptInitializer
 import org.jetbrains.kotlin.psi.psiUtil.getChildrenOfType
 
+class GradleKotlinScriptConfigurationInputsStampCalculator(val project: Project) : ScriptConfigurationInputsStampCalculator {
+    override fun getInputsStamp(file: VirtualFile): Any? {
+        if (!isGradleKotlinScript(file)) return null
+
+        return runReadAction {
+            val ktFile = PsiManager.getInstance(project).findFile(file) as? KtFile
+
+            if (ktFile != null) {
+                val result = StringBuilder()
+                ktFile.script?.blockExpression
+                    ?.getChildrenOfType<KtScriptInitializer>()
+                    ?.forEach {
+                        val call = it.children.singleOrNull() as? KtCallExpression
+                        val callRef = call?.firstChild?.text
+                        if (callRef == "buildscript" || callRef == "plugins") {
+                            result.append(callRef)
+                            val lambda = call.lambdaArguments.singleOrNull()
+                            lambda?.accept(object : PsiRecursiveElementVisitor(false) {
+                                override fun visitElement(element: PsiElement) {
+                                    super.visitElement(element)
+                                    when (element) {
+                                        is PsiWhiteSpace -> if (element.text.contains("\n")) result.append("\n")
+                                        is LeafPsiElement -> result.append(element.text)
+                                    }
+                                }
+                            })
+                            result.append("\n")
+                        }
+                    }
+
+                GradleKotlinScriptConfigurationInputs(
+                    result.toString(),
+                    ServiceManager.getService(project, GradleRelatedFilesListener::class.java)?.lastModified
+                        ?: Long.MIN_VALUE
+                )
+            } else null
+        }
+    }
+}
+
 data class GradleKotlinScriptConfigurationInputs(
     val buildScriptAndPluginsSections: String,
     val relatedFilesModificationsTimestamp: Long
 )
-
-fun gradleScriptConfigurationStamp(project: Project, file: VirtualFile): GradleKotlinScriptConfigurationInputs? {
-    return runReadAction {
-        val ktFile = PsiManager.getInstance(project).findFile(file) as? KtFile
-
-        if (ktFile != null) {
-            val result = StringBuilder()
-            ktFile.script?.blockExpression
-                ?.getChildrenOfType<KtScriptInitializer>()
-                ?.forEach {
-                    val call = it.children.singleOrNull() as? KtCallExpression
-                    val callRef = call?.firstChild?.text
-                    if (callRef == "buildscript" || callRef == "plugins") {
-                        result.append(callRef)
-                        val lambda = call.lambdaArguments.singleOrNull()
-                        lambda?.accept(object : PsiRecursiveElementVisitor(false) {
-                            override fun visitElement(element: PsiElement) {
-                                super.visitElement(element)
-                                when (element) {
-                                    is PsiWhiteSpace -> if (element.text.contains("\n")) result.append("\n")
-                                    is LeafPsiElement -> result.append(element.text)
-                                }
-                            }
-                        })
-                        result.append("\n")
-                    }
-                }
-
-            GradleKotlinScriptConfigurationInputs(
-                result.toString(),
-                ServiceManager.getService(project, GradleRelatedFilesListener::class.java)?.lastModified
-                    ?: Long.MIN_VALUE
-            )
-        } else null
-    }
-}
 
 fun isGradleKotlinScript(virtualFile: VirtualFile) = virtualFile.name.endsWith(".gradle.kts")
 
